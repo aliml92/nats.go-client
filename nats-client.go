@@ -144,6 +144,7 @@ func Subscribe[T any](nc *NatsClient, subject string, ch chan T) error {
 	if !ok {
 		if _, err := nc.Conn.Subscribe(subject, func(m *nats.Msg) {
 			var d T
+			log.Printf("type: %T\n", d)
 			log.Println("Received:", string(m.Data))
 			err = json.Unmarshal(m.Data, &d)
 			if err != nil {
