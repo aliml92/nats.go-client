@@ -138,6 +138,8 @@ func (nc *NatsClient) Reply(subject string, data interface{}, wg *sync.WaitGroup
 	return nil
 }
 
+
+// channel 
 func (nc *NatsClient)  Subscribe(subject string, ch chan any) error {
 	sub, ok := nc.Subs[subject]
 	var err error
