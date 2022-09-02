@@ -138,12 +138,12 @@ func (nc *NatsClient) Reply(subject string, data interface{}, wg *sync.WaitGroup
 	return nil
 }
 
-func Subscribe[T any](nc *NatsClient, subject string, ch chan T) error {
+func (nc *NatsClient)  Subscribe(subject string, ch chan interface{}) error {
 	sub, ok := nc.Subs[subject]
 	var err error
 	if !ok {
 		if _, err := nc.Conn.Subscribe(subject, func(m *nats.Msg) {
-			var d T
+			var d interface{}
 			log.Println("Received:", string(m.Data))
 			err = json.Unmarshal(m.Data, &d)
 			if err != nil {
