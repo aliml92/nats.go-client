@@ -88,7 +88,7 @@ func ScatterGather[T any](nc *NatsClient, subject string, data interface{}) ([]T
 
 
 
-// Reply is not tested,  d
+// Reply is not tested,f
 func (nc *NatsClient) Reply(subject string, data interface{}, wg *sync.WaitGroup) error {
 	sub, ok := nc.Subs[subject]
 	if !ok {
