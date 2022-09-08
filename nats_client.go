@@ -15,6 +15,7 @@ import (
 type NatsClient struct {
 	Conn          *nats.Conn
 	Subs          map[string]*nats.Subscription
+	UniqueReplyTo map[string]string
 	Timeout    	  time.Duration
 }
 
@@ -31,6 +32,7 @@ func NewNatsClient(hostname string, port string) (*NatsClient, error) {
 	return &NatsClient{
 		Conn:          nc,
 		Subs:          make(map[string]*nats.Subscription),
+		UniqueReplyTo: make(map[string]string),
 		Timeout:       time.Second * 5,
 	}, nil
 }
@@ -45,6 +47,46 @@ func (nc *NatsClient) Close() {
 // SetTimeout sets a timeout used for scatter-gather pattern 
 func (nc *NatsClient) SetTimeout(timeout time.Duration) {
 	nc.Timeout = timeout
+}
+
+
+
+// make a new request function 
+func Request[T any](nc *NatsClient, subject string) ([]T, error) {
+	var uniqueReplyTo string
+	var err error
+	sub, ok := nc.Subs[subject]
+	if !ok {
+		uniqueReplyTo = nats.NewInbox()
+		sub, err = nc.Conn.SubscribeSync(uniqueReplyTo)
+		if err != nil {
+			return nil, err
+		}
+		nc.Subs[subject] = sub
+		nc.UniqueReplyTo[subject] = uniqueReplyTo
+	} else {
+		uniqueReplyTo = nc.UniqueReplyTo[subject]
+	}
+	// send data using []byte(data)
+	if err = nc.Conn.PublishRequest(subject, uniqueReplyTo, []byte("req")); err != nil {
+		return nil, err
+	}
+	start := time.Now()
+	var responses []T
+	for time.Since(start) < nc.Timeout {
+		// Probably at maximum 0.1 seconds is enough to get the responses
+		// but we'll wait for 1 second just in case it takes longer
+		msg, err := sub.NextMsg(time.Second)
+		if err != nil {
+			break
+		}
+		var response T
+		if err := json.Unmarshal(msg.Data, &response); err != nil {
+			break
+		}
+		responses = append(responses, response)
+	}
+	return responses, err
 }
 
 
@@ -69,7 +111,7 @@ func ScatterGather[T any](nc *NatsClient, subject string, data interface{}) ([]T
 		return nil, err
 	}
 	for time.Since(time.Now()) < nc.Timeout {
-		msg, err := sub.NextMsg(1 * time.Second)
+		msg, err := sub.NextMsg(time.Second)
 		if err != nil {
 			break
 		}
