@@ -11,107 +11,72 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// A NatsClient wraps a nats connection, subscriptions and a timeout for scatter-gather pattern  
+
+
 type NatsClient struct {
-	Conn          *nats.Conn
-	Subs          map[string]*nats.Subscription
-	UniqueReplyTo map[string]string
-	Timeout    	  time.Duration
+	Conn	*nats.Conn
+	Subs	map[string]*nats.Subscription
 }
 
 
-// NewNatsClient creates a new NatsClient with a default timeout of five seconds
-// and returns it along with error if occurs
-// TODO: allow using credentials when connecting to NATS server
-func NewNatsClient(hostname string, port string) (*NatsClient, error) {
-	url := "nats://" + hostname + ":" + port
-	nc, err := nats.Connect(url)
+func NewNatsClient(urls string, opts []nats.Option) (*NatsClient, error) {
+	nc, err := nats.Connect(urls, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return &NatsClient{
-		Conn:          nc,
-		Subs:          make(map[string]*nats.Subscription),
-		UniqueReplyTo: make(map[string]string),
-		Timeout:       time.Second * 5,
+		Conn:	nc,
+		Subs:	make(map[string]*nats.Subscription),
 	}, nil
 }
 
 
-// Close closes underlying nats connection
 func (nc *NatsClient) Close() {
 	nc.Conn.Close()
 }
 
 
-// SetTimeout sets a timeout used for scatter-gather pattern 
-func (nc *NatsClient) SetTimeout(timeout time.Duration) {
-	nc.Timeout = timeout
-}
-
-
-
-// make a new request function 
-func Request[T any](nc *NatsClient, subject string) ([]T, error) {
-	var uniqueReplyTo string
-	var err error
-	sub, ok := nc.Subs[subject]
-	if !ok {
-		uniqueReplyTo = nats.NewInbox()
-		sub, err = nc.Conn.SubscribeSync(uniqueReplyTo)
-		if err != nil {
-			return nil, err
-		}
-		nc.Subs[subject] = sub
-		nc.UniqueReplyTo[subject] = uniqueReplyTo
-	} else {
-		uniqueReplyTo = nc.UniqueReplyTo[subject]
-	}
-	// send data using []byte(data)
-	if err = nc.Conn.PublishRequest(subject, uniqueReplyTo, []byte("req")); err != nil {
-		return nil, err
-	}
-	start := time.Now()
-	var responses []T
-	for time.Since(start) < nc.Timeout {
-		// Probably at maximum 0.1 seconds is enough to get the responses
-		// but we'll wait for 1 second just in case it takes longer
-		msg, err := sub.NextMsg(time.Second)
-		if err != nil {
-			break
-		}
-		var response T
-		if err := json.Unmarshal(msg.Data, &response); err != nil {
-			break
-		}
-		responses = append(responses, response)
-	}
-	return responses, err
-}
-
-
-
-// ScatterGather publishes data on subject and waits on uniqueReplyTo until timeout exceeds to gather responses
-// and it returns collected responses or error if occurs 
-func ScatterGather[T any](nc *NatsClient, subject string, data interface{}) ([]T, error) {
-	var err error
-	uniqueReplyTo := nats.NewInbox()
-	sub, err := nc.Conn.SubscribeSync(uniqueReplyTo)
+//  ScatterGather is a common scatter-gather function for collecting responses 
+//  from multiple services whose responses are of type T.
+//  Example:    
+//                     
+//                      
+//	          /---> (Service-B) 
+//	         /  
+//	        /     
+//	   (Service-A) ----> (Service-B) 
+//	        \
+//	         \            
+//	          \	    
+// 		       \----> (Service-B) 
+//    		 	        
+//    			       
+//
+//   In the above example, 
+//                 	    Service-A is the caller
+//                     	Service-B is the responder
+//                      T is the type of response from Service-B.
+//
+func ScatterGather[T any](nc *NatsClient, subject string, data interface{}, timeout time.Duration) (responses []T, err error) {
+	replyTo := nats.NewInbox()
+	sub, err := nc.Conn.SubscribeSync(replyTo)
+	defer sub.Unsubscribe()
 	if err != nil {
 		return nil, err
-	}	
+	}
+	nc.Conn.Flush()
+
 	defer sub.Unsubscribe()
 	b, err := json.Marshal(data)
 	if err != nil {
 		return nil, err
 	}
-	var responses []T
-	err = nc.Conn.PublishRequest(subject, uniqueReplyTo, b)
-	if err != nil {
+	if err = nc.Conn.PublishRequest(subject, replyTo, b); err != nil {
 		return nil, err
 	}
-	for time.Since(time.Now()) < nc.Timeout {
-		msg, err := sub.NextMsg(time.Second)
+	start := time.Now()
+	for time.Since(start) < timeout {
+		msg, err := sub.NextMsg(timeout)
 		if err != nil {
 			break
 		}
@@ -121,16 +86,11 @@ func ScatterGather[T any](nc *NatsClient, subject string, data interface{}) ([]T
 		}
 		responses = append(responses, response)
 	}
-	if len(responses) > 0 {
-		err = nil
-	}
-	return responses, nil
+	return responses, err
 }
 
-
-
-
-// Reply is not tested
+// Reply is a common reply function for replying to a request
+// Can be used as responder to a request of ScatterGather and RequestAction functions
 func (nc *NatsClient) Reply(subject string, data interface{}, wg *sync.WaitGroup) error {
 	sub, ok := nc.Subs[subject]
 	if !ok {
@@ -150,7 +110,59 @@ func (nc *NatsClient) Reply(subject string, data interface{}, wg *sync.WaitGroup
 }
 
 
-// Subscribe subscribes on subject receives data via ch channel 
+//   RequestAction is a specailized scatter-gather function for collecting responses 
+//   from multiple services which in turn are collecting T type responses from multiple services.
+//   Example:    
+//                     /----> (Service-C)
+//                    /   
+//          /---> (Service-B) ----> (Service-C)
+//         /  
+//        /     
+//   (Service-A) ----> (Service-B) ----> (Service-C)
+//        \
+//         \             /----> (Service-C)
+//          \	    	/
+//           \----> (Service-B) ----> (Service-C)
+//    		 	        \
+//    			         \----> (Service-C)
+//
+//   In the above example, 
+//                 	    Service-A is the caller
+//                     	Service-B is the responder
+//                      Service-C is the responder to Service-B.
+//                      T is the type of response from Service-C.
+//
+func RequestAction[T any](nc *NatsClient, subject string, data interface{}, timeout time.Duration) (responses [][]T, err error) {
+	replyTo := nats.NewInbox()
+	sub, err := nc.Conn.SubscribeSync(replyTo)
+	if err != nil {
+		return nil, err
+	}
+	defer sub.Unsubscribe()
+	nc.Conn.Flush()
+
+	b, _ := json.Marshal(data)
+	if err = nc.Conn.PublishRequest(subject, replyTo, b); err != nil {
+		return nil, err
+	}
+	start := time.Now()
+	for time.Since(start) < timeout {
+		msg, err := sub.NextMsg(timeout)
+		if err != nil {
+			break
+		}
+		var response []T
+		if err := json.Unmarshal(msg.Data, &response); err != nil {
+			break
+		}
+		responses = append(responses, response)
+	}
+	return responses, err
+}
+
+
+// Subscribe subscribes on subject receives data via ch channel
+// NOTE: needs testing 
 func Subscribe[T any](nc *NatsClient, subject string, ch chan T) error {
 	sub, ok := nc.Subs[subject]
 	var err error
@@ -171,7 +183,8 @@ func Subscribe[T any](nc *NatsClient, subject string, ch chan T) error {
 }
 
 
-// Publish publishes data on subject or returns error if data cannot be converted to json 
+// Publish publishes data on subject or returns error if data cannot be converted to json
+// NOTE: needs testing  
 func (nc *NatsClient) Publish(subject string, data interface{}) error {
 	j, err := json.Marshal(data)
 	if err != nil {
