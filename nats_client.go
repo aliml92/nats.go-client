@@ -192,3 +192,31 @@ func (nc *NatsClient) Publish(subject string, data interface{}) error {
 	}
 	return nc.Conn.Publish(subject, j)
 }
+
+func Request[T any](nc *NatsClient, subject string, timeout time.Duration) (responses []T, err error) {
+	replyTo := nats.NewInbox()
+	sub, err := nc.Conn.SubscribeSync(replyTo)
+	defer sub.Unsubscribe()
+	if err != nil {
+		return nil, err
+	}
+	nc.Conn.Flush()
+
+	defer sub.Unsubscribe()
+	if err = nc.Conn.PublishRequest(subject, replyTo, []byte("req")); err != nil {
+		return nil, err
+	}
+	start := time.Now()
+	for time.Since(start) < timeout {
+		msg, err := sub.NextMsg(timeout)
+		if err != nil {
+			break
+		}
+		var response T
+		if err = json.Unmarshal(msg.Data, &response); err != nil {
+			break
+		}
+		responses = append(responses, response)
+	}
+	return responses, err
+}
