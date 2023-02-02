@@ -203,7 +203,7 @@ func Request[T any](nc *NatsClient, subject string, timeout time.Duration) (resp
 	nc.Conn.Flush()
 
 	defer sub.Unsubscribe()
-	if err = nc.Conn.PublishRequest(subject, replyTo, []byte("req")); err != nil {
+	if err = nc.Conn.PublishRequest(subject, replyTo, []byte("")); err != nil {
 		return nil, err
 	}
 	start := time.Now()
